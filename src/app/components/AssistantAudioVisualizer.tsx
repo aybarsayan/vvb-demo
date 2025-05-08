@@ -146,6 +146,7 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
   const [analysisData, setAnalysisData] = useState<any>(null);
   const [permissionError, setPermissionError] = useState<string | null>(null);
   const [isMobile, setIsMobile] = useState(false);
+  const analysisRef = useRef<HTMLDivElement>(null);
   
   // WebSocket ve Ses işleme için referanslar
   const websocketRef = useRef<WebSocket | null>(null);
@@ -505,6 +506,17 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
             console.log('Analiz verisi bulundu:', data.callInfo.resultData);
             setAnalysisData(data.callInfo.resultData);
             setIsLoading(false);
+            
+            // Yükleme tamamlandığında scroll işlemi
+            setTimeout(() => {
+              if (analysisRef.current) {
+                analysisRef.current.scrollIntoView({ 
+                  behavior: 'smooth',
+                  block: 'start'
+                });
+              }
+            }, 100);
+            
             return true;
           } else {
             console.warn('API yanıtında resultData bulunamadı:', data);
@@ -766,6 +778,7 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
       <AnalysisResponse 
         data={analysisData}
         isVisible={showAnalysis}
+        ref={analysisRef}
       />
     </div>
   );

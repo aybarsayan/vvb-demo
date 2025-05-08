@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useRef, useState } from 'react';
+import { toPng } from 'html-to-image';
 
 interface Score {
   [key: string]: number;
@@ -33,9 +34,52 @@ interface AnalysisData {
 interface AnalysisResponseProps {
   data?: AnalysisData;
   isVisible: boolean;
+  ref?: React.RefObject<HTMLDivElement | null>;
 }
 
-const AnalysisResponse: React.FC<AnalysisResponseProps> = ({ data, isVisible }) => {
+const AnalysisResponse: React.FC<AnalysisResponseProps> = ({ data, isVisible, ref }) => {
+  const analysisRef = useRef<HTMLDivElement | null>(null);
+  const [isCapturing, setIsCapturing] = useState(false);
+
+  const captureAndDownload = async () => {
+    if (!analysisRef.current || isCapturing) return;
+
+    try {
+      setIsCapturing(true);
+
+      // Mobil cihaz kontrolü
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
+      const dataUrl = await toPng(analysisRef.current, {
+        quality: 0.95,
+        pixelRatio: isMobile ? 1 : 2,
+        backgroundColor: '#F7F5FF',
+        style: {
+          transform: 'scale(1)',
+          margin: '20px',
+          padding: '20px'
+        }
+      });
+
+      // İndirme linki oluştur
+      const link = document.createElement('a');
+      link.download = `nora-skor-${totalScore}.png`;
+      link.href = dataUrl;
+      
+      // Mobil cihazlarda yeni sekmede aç
+      if (isMobile) {
+        window.open(dataUrl, '_blank');
+      } else {
+        link.click();
+      }
+    } catch (error) {
+      console.error('Ekran görüntüsü alınamadı:', error);
+      alert('Ekran görüntüsü alınamadı. Lütfen tekrar deneyin.');
+    } finally {
+      setIsCapturing(false);
+    }
+  };
+
   if (!isVisible || !data) return null;
 
   const getScoreColor = (score: number) => {
@@ -163,12 +207,35 @@ const AnalysisResponse: React.FC<AnalysisResponseProps> = ({ data, isVisible }) 
   };
 
   return (
-    <div className="mt-4 bg-white rounded-lg shadow-sm p-4 border border-[#E9E4FF]">
+    <div className="mt-4 bg-white rounded-lg shadow-sm p-4 border border-[#E9E4FF]" ref={ref || analysisRef}>
       <div className="mb-4">
         <h2 className="text-lg font-semibold text-[#6B46C1] mb-2">Analiz Sonuçları</h2>
         
         {/* Toplam Puan ve Başlık Bölümü */}
-        <div className="flex flex-col items-center gap-4 bg-[#F7F5FF]/30 rounded-lg p-4">
+        <div className="flex flex-col items-center gap-4 bg-[#F7F5FF] rounded-lg p-4 relative">
+          <div className="absolute top-3 right-3">
+            <div className="relative group">
+              <button 
+                className={`flex items-center gap-2 px-3 py-1.5 bg-white hover:bg-[#F7F5FF] rounded-full transition-all duration-300 shadow-sm hover:shadow ${isCapturing ? 'opacity-50 cursor-not-allowed' : ''}`}
+                onClick={captureAndDownload}
+                disabled={isCapturing}
+              >
+                <div className="w-5 h-5 rounded-full overflow-hidden bg-white p-0.5">
+                  <img src="/nora.png" alt="Nora Logo" className="w-full h-full object-contain" />
+                </div>
+                <span className="text-sm font-medium text-[#6B46C1]">
+                  {isCapturing ? 'İşleniyor...' : 'Nora\'da Paylaş'}
+                </span>
+              </button>
+              {!isCapturing && (
+                <>
+                  <div className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full animate-ping opacity-75"></div>
+                  <div className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full"></div>
+                </>
+              )}
+            </div>
+          </div>
+
           <div className="text-center">
             <h3 className="text-2xl font-bold text-[#6B46C1] mb-2">Toplam Puan</h3>
             <div className="text-4xl font-bold mb-2 text-[#6B46C1]">{totalScore}</div>
