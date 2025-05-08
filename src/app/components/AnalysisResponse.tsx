@@ -193,7 +193,7 @@ const AnalysisResponse: React.FC<AnalysisResponseProps> = ({ data, isVisible }) 
           <span className={`px-2 py-1 rounded-full text-sm font-medium ${getScoreBackground(data.overall_difficulty_index)} ${getScoreColor(data.overall_difficulty_index)}`}>
             {data.difficulty_level}
           </span>
-        </div>
+        </div> 
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
