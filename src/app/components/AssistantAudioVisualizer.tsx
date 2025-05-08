@@ -272,6 +272,14 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
       // Bu tamponun süresini hesaplama
       const duration = buffer.length / SAMPLE_RATE_RECEIVER;
 
+      // Mobil cihazlar için özel işlem
+      if (isMobile) {
+        // Ses bağlamının durumunu kontrol et ve gerekirse başlat
+        if (audioContextReceiverRef.current.state === 'suspended') {
+          audioContextReceiverRef.current.resume();
+        }
+      }
+
       // nextPlaybackTime'ı audioContext'in currentTime'ından geride ise ayarlama
       const currentTime = audioContextReceiverRef.current.currentTime;
       if (nextPlaybackTimeRef.current < currentTime + 0.01) {
@@ -285,7 +293,19 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
       // BufferSource oluşturma
       const source = audioContextReceiverRef.current.createBufferSource();
       source.buffer = audioBuffer;
-      source.connect(audioContextReceiverRef.current.destination);
+
+      // Mobil cihazlar için ses çıkışını optimize et
+      if (isMobile) {
+        // Ses seviyesini artır
+        const gainNode = audioContextReceiverRef.current.createGain();
+        gainNode.gain.value = 1.5; // Ses seviyesini %50 artır
+        
+        // Ses çıkışını bağla
+        source.connect(gainNode);
+        gainNode.connect(audioContextReceiverRef.current.destination);
+      } else {
+        source.connect(audioContextReceiverRef.current.destination);
+      }
 
       // Tamponu zamanla
       try {
@@ -374,6 +394,11 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
         sampleRate: SAMPLE_RATE_RECEIVER,
         latencyHint: isMobile ? 'interactive' : 'playback'
       });
+
+      // Mobil cihazlar için ses bağlamını hemen başlat
+      if (isMobile && audioContextReceiverRef.current.state === 'suspended') {
+        await audioContextReceiverRef.current.resume();
+      }
 
       // Oynatma zamanlama değişkenlerini başlat
       nextPlaybackTimeRef.current = audioContextReceiverRef.current.currentTime + 0.01;
@@ -571,7 +596,8 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
             audio: {
               echoCancellation: true,
               noiseSuppression: true,
-              autoGainControl: true
+              autoGainControl: true,
+              channelCount: 1 // Mono ses
             } 
           });
           stream.getTracks().forEach(track => track.stop()); // İzinleri aldıktan sonra stream'i kapat
