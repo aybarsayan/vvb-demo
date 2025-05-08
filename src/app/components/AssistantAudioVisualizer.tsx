@@ -158,6 +158,8 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
   const activeAudioSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const sendQueueRef = useRef<ArrayBuffer[]>([]);
   const isSendingRef = useRef<boolean>(false);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
   
   // Sabitler
   const BUFFER_SIZE = 4096; // bytes
@@ -166,6 +168,7 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
   const BYTES_PER_SAMPLE = 2; // 16-bit
   const CHANNELS = 1; // Mono
   const MIN_BUFFER_SECONDS = 0.01; // Minimum tampon süresi
+  const FFT_SIZE = 2048; // Ses analizi için FFT boyutu
 
   // Mobil cihaz kontrolü
   useEffect(() => {
@@ -263,60 +266,82 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
     }
   };
 
+  // Ses analizi için animasyon döngüsü
+  const updateWaveform = () => {
+    if (!analyserRef.current || !isAISpeaking) {
+      animationFrameRef.current = requestAnimationFrame(updateWaveform);
+      return;
+    }
+
+    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+    analyserRef.current.getByteFrequencyData(dataArray);
+
+    // Ses seviyesini hesapla (0-100 arası)
+    const bassFrequencies = dataArray.slice(0, 20);
+    const midFrequencies = dataArray.slice(20, 100);
+    const highFrequencies = dataArray.slice(100);
+
+    const bassAverage = bassFrequencies.reduce((a, b) => a + b) / bassFrequencies.length;
+    const midAverage = midFrequencies.reduce((a, b) => a + b) / midFrequencies.length;
+    const highAverage = highFrequencies.reduce((a, b) => a + b) / highFrequencies.length;
+
+    // Farklı frekans bantlarını ağırlıklandır
+    const weightedAverage = (bassAverage * 2 + midAverage * 1.5 + highAverage) / 4.5;
+    const rawIntensity = (weightedAverage / 16) * 100;
+    const smoothedIntensity = Math.max(5, Math.min(100, rawIntensity));
+    
+    setWaveIntensity(smoothedIntensity);
+    animationFrameRef.current = requestAnimationFrame(updateWaveform);
+  };
+
   // Ses tamponunu işleme
-  const processAudioBuffer = async () => {
+  const processAudioBuffer = () => {
     while (audioBufferQueueRef.current.length > 0) {
       const buffer = audioBufferQueueRef.current.shift();
       if (!buffer || !audioContextReceiverRef.current) continue;
 
-      try {
-        // Mobil cihazlar için ses bağlamını kontrol et
-        if (isMobile && audioContextReceiverRef.current.state === 'suspended') {
-          await audioContextReceiverRef.current.resume();
-        }
-
-        const duration = buffer.length / SAMPLE_RATE_RECEIVER;
-        const currentTime = audioContextReceiverRef.current.currentTime;
-        
-        if (nextPlaybackTimeRef.current < currentTime + 0.01) {
-          nextPlaybackTimeRef.current = currentTime + 0.01;
-        }
-
-        const audioBuffer = audioContextReceiverRef.current.createBuffer(1, buffer.length, SAMPLE_RATE_RECEIVER);
-        audioBuffer.copyToChannel(buffer, 0, 0);
-
-        const source = audioContextReceiverRef.current.createBufferSource();
-        source.buffer = audioBuffer;
-
-        // Mobil cihazlar için ses çıkışını optimize et
-        if (isMobile) {
-          const gainNode = audioContextReceiverRef.current.createGain();
-          gainNode.gain.value = 2.0; // Ses seviyesini artır
-          
-          source.connect(gainNode);
-          gainNode.connect(audioContextReceiverRef.current.destination);
-        } else {
-          source.connect(audioContextReceiverRef.current.destination);
-        }
-
-        source.start(nextPlaybackTimeRef.current);
-        activeAudioSourcesRef.current.push(source);
-
-        source.onended = () => {
-          const index = activeAudioSourcesRef.current.indexOf(source);
-          if (index > -1) {
-            activeAudioSourcesRef.current.splice(index, 1);
-          }
-          if (activeAudioSourcesRef.current.length === 0 && audioBufferQueueRef.current.length === 0) {
-            setIsAISpeaking(false);
-            setWaveIntensity(0);
-          }
-        };
-
-        nextPlaybackTimeRef.current += duration;
-      } catch (error) {
-        console.error('Ses işleme hatası:', error);
+      const duration = buffer.length / SAMPLE_RATE_RECEIVER;
+      const currentTime = audioContextReceiverRef.current.currentTime;
+      
+      if (nextPlaybackTimeRef.current < currentTime + 0.01) {
+        nextPlaybackTimeRef.current = currentTime + 0.01;
       }
+
+      const audioBuffer = audioContextReceiverRef.current.createBuffer(1, buffer.length, SAMPLE_RATE_RECEIVER);
+      audioBuffer.copyToChannel(buffer, 0, 0);
+
+      const source = audioContextReceiverRef.current.createBufferSource();
+      source.buffer = audioBuffer;
+
+      // Ses analizi için bağlantıları kur
+      if (analyserRef.current) {
+        source.connect(analyserRef.current);
+        analyserRef.current.connect(audioContextReceiverRef.current.destination);
+      } else {
+        source.connect(audioContextReceiverRef.current.destination);
+      }
+
+      try {
+        source.start(nextPlaybackTimeRef.current);
+      } catch (e) {
+        console.error('Ses kaynağını başlatırken hata:', e);
+        continue;
+      }
+
+      activeAudioSourcesRef.current.push(source);
+
+      source.onended = () => {
+        const index = activeAudioSourcesRef.current.indexOf(source);
+        if (index > -1) {
+          activeAudioSourcesRef.current.splice(index, 1);
+        }
+        if (activeAudioSourcesRef.current.length === 0 && audioBufferQueueRef.current.length === 0) {
+          setIsAISpeaking(false);
+          setWaveIntensity(0);
+        }
+      };
+
+      nextPlaybackTimeRef.current += duration;
     }
   };
 
@@ -355,105 +380,71 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
   };
 
   // Ses alıcıyı hazırlama
-  const setupAudioReceiver = async () => {
-    try {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      
-      if (!audioContextReceiverRef.current) {
-        audioContextReceiverRef.current = new AudioCtx({
-          sampleRate: SAMPLE_RATE_RECEIVER,
-          latencyHint: isMobile ? 'interactive' : 'playback'
-        });
-      }
+  const setupAudioReceiver = () => {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    audioContextReceiverRef.current = new AudioCtx({
+      sampleRate: SAMPLE_RATE_RECEIVER
+    });
 
-      // Mobil cihazlar için özel işlem
-      if (isMobile) {
-        const resumeAudioContext = async () => {
-          if (audioContextReceiverRef.current?.state === 'suspended') {
-            await audioContextReceiverRef.current.resume();
-          }
-        };
+    // AnalyserNode oluştur
+    analyserRef.current = audioContextReceiverRef.current.createAnalyser();
+    analyserRef.current.fftSize = FFT_SIZE;
+    analyserRef.current.smoothingTimeConstant = 0.2;
 
-        // Kullanıcı etkileşimi ile ses bağlamını başlat
-        document.addEventListener('click', resumeAudioContext, { once: true });
-        document.addEventListener('touchstart', resumeAudioContext, { once: true });
-        
-        // Ses bağlamını hemen başlat
-        if (audioContextReceiverRef.current.state === 'suspended') {
-          await audioContextReceiverRef.current.resume();
-        }
-      }
+    nextPlaybackTimeRef.current = audioContextReceiverRef.current.currentTime + 0.01;
 
-      nextPlaybackTimeRef.current = audioContextReceiverRef.current.currentTime + 0.01;
-
-      if (websocketRef.current) {
-        websocketRef.current.onmessage = async (event) => {
-          if (typeof event.data === 'string') {
-            // Metin mesajlarını işle
-            console.log(`Metin mesajı alındı: ${event.data}`);
+    if (websocketRef.current) {
+      websocketRef.current.onmessage = (event) => {
+        if (typeof event.data === 'string') {
+          // Metin mesajlarını işle
+          console.log(`Metin mesajı alındı: ${event.data}`);
+          
+          // Call ID'yi kontrol et - çeşitli formatları destekle
+          const data = event.data.trim();
+          
+          if (data.toLowerCase().includes('callid:') || 
+              data.toLowerCase().includes('call id:') || 
+              data.toLowerCase().includes('call_id:')) {
             
-            // Call ID'yi kontrol et - çeşitli formatları destekle
-            const data = event.data.trim();
-            
-            if (data.toLowerCase().includes('callid:') || 
-                data.toLowerCase().includes('call id:') || 
-                data.toLowerCase().includes('call_id:')) {
-              
-              // Metinden ID'yi çıkar
-              let id = '';
-              if (data.includes(':')) {
-                id = data.split(':')[1].trim();
-              } else {
-                id = data.trim();
-              }
-              
-              console.log(`Call ID yakalandı: ${id}`);
-              if (id) {
-                setCallId(id);
-              }
-            } else if (data === 'clear') {
-              resetPlayer();
-            } else if (data.startsWith("İnsan:") || data.startsWith("Human:") || data.startsWith("Kullanıcı:")) {
-              // Kullanıcının kendi konuşmasını gösterme
-              setIsUserMessage(true);
+            // Metinden ID'yi çıkar
+            let id = '';
+            if (data.includes(':')) {
+              id = data.split(':')[1].trim();
             } else {
-              // Sadece asistanın yanıtlarını göster
-              if (!isUserMessage) {
-                //setMessage(data);
-              }
-              setIsUserMessage(false);
+              id = data.trim();
             }
-          } else if (event.data instanceof ArrayBuffer) {
-            try {
-              const arrayBuffer = event.data;
-              if (!arrayBuffer || arrayBuffer.byteLength === 0) return;
-
-              const int16Array = new Int16Array(arrayBuffer);
-              if (int16Array.length === 0) return;
-
-              const float32Array = int16ToFloat32(int16Array);
-              if (float32Array.length === 0) return;
-
-              // Mobil cihazlar için ses işleme
-              if (isMobile) {
-                // Ses bağlamını kontrol et
-                if (audioContextReceiverRef.current?.state === 'suspended') {
-                  await audioContextReceiverRef.current.resume();
-                }
-              }
-
-              enqueueAudio(float32Array);
-            } catch (error) {
-              console.error('Ses işleme hatası:', error);
+            
+            console.log(`Call ID yakalandı: ${id}`);
+            if (id) {
+              setCallId(id);
             }
+          } else if (data === 'clear') {
+            resetPlayer();
+          } else if (data.startsWith("İnsan:") || data.startsWith("Human:") || data.startsWith("Kullanıcı:")) {
+            // Kullanıcının kendi konuşmasını gösterme
+            setIsUserMessage(true);
           } else {
-            console.warn('Desteklenmeyen mesaj türü alındı.');
+            // Sadece asistanın yanıtlarını göster
+            if (!isUserMessage) {
+              //setMessage(data);
+            }
+            setIsUserMessage(false);
           }
-        };
-      }
-    } catch (error) {
-      console.error('Ses alıcı kurulumunda hata:', error);
-      setPermissionError('Ses sistemi başlatılamadı. Lütfen sayfayı yenileyin ve tekrar deneyin.');
+        } else if (event.data instanceof ArrayBuffer) {
+          const arrayBuffer = event.data;
+          if (!arrayBuffer || arrayBuffer.byteLength === 0) return;
+
+          const int16Array = new Int16Array(arrayBuffer);
+          if (int16Array.length === 0) return;
+
+          const float32Array = int16ToFloat32(int16Array);
+          if (float32Array.length === 0) return;
+
+          enqueueAudio(float32Array);
+        } else {
+          console.warn('Desteklenmeyen mesaj türü alındı.');
+        }
+      };
     }
   };
 
@@ -676,24 +667,30 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
     }
   };
 
+  // AI konuşuyorsa dalgaları aktifleştir
+  useEffect(() => {
+    if (isAISpeaking) {
+      updateWaveform();
+    } else {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      setWaveIntensity(0);
+    }
+  }, [isAISpeaking]);
+
   // Component unmount olduğunda bağlantıyı temizleme
   useEffect(() => {
     return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
       if (websocketRef.current) {
         websocketRef.current.close();
       }
       cleanup();
     };
   }, []);
-
-  // AI konuşuyorsa dalgaları aktifleştir
-  useEffect(() => {
-    if (isAISpeaking) {
-      setWaveIntensity(100);
-    } else {
-      setWaveIntensity(0);
-    }
-  }, [isAISpeaking]);
   
   return (
     <div className="bg-[#F7F5FF]/30 rounded-lg p-3 shadow-inner">
