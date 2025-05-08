@@ -107,7 +107,7 @@ const AnalysisResponse: React.FC<AnalysisResponseProps> = ({ data, isVisible }) 
       };
     } else {
       return {
-        title: "Aramıza hoşgeldin dünyanın en naif insanı",
+        title: "Aramıza hoşgeldin Ebubekir Sıddık Bebek",
         image: "foto1.jpg",
         color: "text-purple-700",
         bgColor: "bg-purple-100"
