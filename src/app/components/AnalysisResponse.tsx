@@ -70,21 +70,21 @@ const AnalysisResponse: React.FC<AnalysisResponseProps> = ({ data, isVisible }) 
 
   // Puan aralığına göre başlık ve resim belirle
   const getScoreInfo = (score: number) => {
-    if (score >= 2500) {
+    if (score >= 1600) {
       return {
         title: "Şeytan aradı, yarın işe başlamak ister misin diye soruyor",
         image: "foto6.jpg",
         color: "text-red-700",
         bgColor: "bg-red-100"
       };
-    } else if (score >= 2000) {
+    } else if (score >= 1300) {
       return {
         title: "Twitter hesabını görmek istiyorum, ama korkuyorum dehşete düşeceğim diye",
         image: "foto5.jpg",
         color: "text-orange-700",
         bgColor: "bg-orange-100"
       };
-    } else if (score >= 1500) {
+    } else if (score >= 1200) {
       return {
         title: "Sinir seni yönetiyor. Bunu sevdim.",
         image: "foto4.jpg",
