@@ -144,6 +144,8 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
   const [showAnalysis, setShowAnalysis] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [analysisData, setAnalysisData] = useState<any>(null);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [isMobile, setIsMobile] = useState(false);
   
   // WebSocket ve Ses işleme için referanslar
   const websocketRef = useRef<WebSocket | null>(null);
@@ -164,6 +166,19 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
   const BYTES_PER_SAMPLE = 2; // 16-bit
   const CHANNELS = 1; // Mono
   const MIN_BUFFER_SECONDS = 0.01; // Minimum tampon süresi
+
+  // Mobil cihaz kontrolü
+  useEffect(() => {
+    const checkMobile = () => {
+      const userAgent = navigator.userAgent || navigator.vendor || (window as any).opera;
+      const mobileRegex = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
+      setIsMobile(mobileRegex.test(userAgent));
+    };
+    
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
 
   // Flow name prop değiştiğinde state'i güncelle
   useEffect(() => {
@@ -336,90 +351,111 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
   };
 
   // Ses alıcıyı hazırlama
-  const setupAudioReceiver = () => {
-    // Ses alma için AudioContext başlatma
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    audioContextReceiverRef.current = new AudioCtx({
-      sampleRate: SAMPLE_RATE_RECEIVER
-    });
+  const setupAudioReceiver = async () => {
+    try {
+      // Ses alma için AudioContext başlatma
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      
+      // Mobil tarayıcılar için özel işlem
+      if (isMobile) {
+        // Kullanıcı etkileşimi gerektiren bir olayı bekle
+        const resumeAudioContext = async () => {
+          if (audioContextReceiverRef.current?.state === 'suspended') {
+            await audioContextReceiverRef.current.resume();
+          }
+        };
+        
+        // Sayfa yüklendiğinde ve kullanıcı etkileşiminde ses bağlamını başlat
+        document.addEventListener('click', resumeAudioContext, { once: true });
+        document.addEventListener('touchstart', resumeAudioContext, { once: true });
+      }
 
-    // Oynatma zamanlama değişkenlerini başlat
-    nextPlaybackTimeRef.current = audioContextReceiverRef.current.currentTime + 0.01;
+      audioContextReceiverRef.current = new AudioCtx({
+        sampleRate: SAMPLE_RATE_RECEIVER,
+        latencyHint: isMobile ? 'interactive' : 'playback'
+      });
 
-    if (websocketRef.current) {
-      websocketRef.current.onmessage = (event) => {
-        if (typeof event.data === 'string') {
-          // Metin mesajlarını işle
-          console.log(`Metin mesajı alındı: ${event.data}`);
-          
-          // Call ID'yi kontrol et - çeşitli formatları destekle
-          const data = event.data.trim();
-          
-          if (data.toLowerCase().includes('callid:') || 
-              data.toLowerCase().includes('call id:') || 
-              data.toLowerCase().includes('call_id:')) {
+      // Oynatma zamanlama değişkenlerini başlat
+      nextPlaybackTimeRef.current = audioContextReceiverRef.current.currentTime + 0.01;
+
+      if (websocketRef.current) {
+        websocketRef.current.onmessage = (event) => {
+          if (typeof event.data === 'string') {
+            // Metin mesajlarını işle
+            console.log(`Metin mesajı alındı: ${event.data}`);
             
-            // Metinden ID'yi çıkar
-            let id = '';
-            if (data.includes(':')) {
-              id = data.split(':')[1].trim();
+            // Call ID'yi kontrol et - çeşitli formatları destekle
+            const data = event.data.trim();
+            
+            if (data.toLowerCase().includes('callid:') || 
+                data.toLowerCase().includes('call id:') || 
+                data.toLowerCase().includes('call_id:')) {
+              
+              // Metinden ID'yi çıkar
+              let id = '';
+              if (data.includes(':')) {
+                id = data.split(':')[1].trim();
+              } else {
+                id = data.trim();
+              }
+              
+              console.log(`Call ID yakalandı: ${id}`);
+              if (id) {
+                setCallId(id);
+              }
+            } else if (data === 'clear') {
+              resetPlayer();
+            } else if (data.startsWith("İnsan:") || data.startsWith("Human:") || data.startsWith("Kullanıcı:")) {
+              // Kullanıcının kendi konuşmasını gösterme
+              setIsUserMessage(true);
             } else {
-              id = data.trim();
+              // Sadece asistanın yanıtlarını göster
+              if (!isUserMessage) {
+                //setMessage(data);
+              }
+              setIsUserMessage(false);
             }
-            
-            console.log(`Call ID yakalandı: ${id}`);
-            if (id) {
-              setCallId(id);
+          } else if (event.data instanceof ArrayBuffer) {
+            // Binary (ses) mesajlarını işle
+            const arrayBuffer = event.data;
+
+            if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+              console.warn('Boş ses paketi alındı.');
+              return;
             }
-          } else if (data === 'clear') {
-            resetPlayer();
-          } else if (data.startsWith("İnsan:") || data.startsWith("Human:") || data.startsWith("Kullanıcı:")) {
-            // Kullanıcının kendi konuşmasını gösterme
-            setIsUserMessage(true);
+
+            console.log(`${arrayBuffer.byteLength} byte uzunluğunda ses paketi alındı.`);
+
+            // Int16Array oluşturmayı dene
+            let int16Array;
+            try {
+              int16Array = new Int16Array(arrayBuffer);
+            } catch (e) {
+              console.error('ArrayBuffer\'ı Int16Array\'e dönüştürürken hata:', e);
+              return;
+            }
+
+            if (int16Array.length === 0) {
+              console.warn('0 uzunluklu Int16Array alındı.');
+              return;
+            }
+
+            const float32Array = int16ToFloat32(int16Array);
+
+            if (float32Array.length === 0) {
+              console.warn('Dönüştürülen Float32Array\'in uzunluğu 0.');
+              return;
+            }
+
+            enqueueAudio(float32Array);
           } else {
-            // Sadece asistanın yanıtlarını göster
-            if (!isUserMessage) {
-              //setMessage(data);
-            }
-            setIsUserMessage(false);
+            console.warn('Desteklenmeyen mesaj türü alındı.');
           }
-        } else if (event.data instanceof ArrayBuffer) {
-          // Binary (ses) mesajlarını işle
-          const arrayBuffer = event.data;
-
-          if (!arrayBuffer || arrayBuffer.byteLength === 0) {
-            console.warn('Boş ses paketi alındı.');
-            return;
-          }
-
-          console.log(`${arrayBuffer.byteLength} byte uzunluğunda ses paketi alındı.`);
-
-          // Int16Array oluşturmayı dene
-          let int16Array;
-          try {
-            int16Array = new Int16Array(arrayBuffer);
-          } catch (e) {
-            console.error('ArrayBuffer\'ı Int16Array\'e dönüştürürken hata:', e);
-            return;
-          }
-
-          if (int16Array.length === 0) {
-            console.warn('0 uzunluklu Int16Array alındı.');
-            return;
-          }
-
-          const float32Array = int16ToFloat32(int16Array);
-
-          if (float32Array.length === 0) {
-            console.warn('Dönüştürülen Float32Array\'in uzunluğu 0.');
-            return;
-          }
-
-          enqueueAudio(float32Array);
-        } else {
-          console.warn('Desteklenmeyen mesaj türü alındı.');
-        }
-      };
+        };
+      }
+    } catch (error) {
+      console.error('Ses alıcı kurulumunda hata:', error);
+      setPermissionError('Ses sistemi başlatılamadı. Lütfen sayfayı yenileyin ve tekrar deneyin.');
     }
   };
 
@@ -520,12 +556,33 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
   // WebSocket bağlantısını kurma
   const connect = async () => {
     try {
-      // Bağlantı öncesi temizlik yap (tekrar bağlanma durumları için)
+      setPermissionError(null);
+      
+      // Bağlantı öncesi temizlik yap
       if (websocketRef.current) {
         disconnect();
       }
+
+      // Mobil tarayıcılar için özel işlem
+      if (isMobile) {
+        // Önce ses izinlerini kontrol et
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ 
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            } 
+          });
+          stream.getTracks().forEach(track => track.stop()); // İzinleri aldıktan sonra stream'i kapat
+        } catch (err) {
+          console.error('Mikrofon izni alınamadı:', err);
+          setPermissionError('Mikrofon erişimi reddedildi. Lütfen tarayıcı ayarlarından mikrofon iznini etkinleştirin.');
+          return;
+        }
+      }
       
-      // WebSocket'i başlat (flow name ile)
+      // WebSocket'i başlat
       const currentFlowName = flowName || 'demo';
       websocketRef.current = new WebSocket(`wss://duplexdev.virtualvoicebridge.com/ws?flowName=sirket-ici-demo`);
       websocketRef.current.binaryType = 'arraybuffer';
@@ -538,12 +595,20 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
         // Gönderen için AudioContext'i başlat
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         audioContextSenderRef.current = new AudioCtx({
-          sampleRate: SAMPLE_RATE
+          sampleRate: SAMPLE_RATE,
+          latencyHint: isMobile ? 'interactive' : 'playback'
         });
 
         // Mikrofon erişimi al
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const stream = await navigator.mediaDevices.getUserMedia({ 
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            } 
+          });
+          
           microphoneRef.current = audioContextSenderRef.current.createMediaStreamSource(stream);
 
           // Tampon boyutunu örneklerde hesapla
@@ -558,21 +623,18 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
           scriptProcessorRef.current.onaudioprocess = (audioProcessingEvent) => {
             const inputBuffer = audioProcessingEvent.inputBuffer;
             const inputData = inputBuffer.getChannelData(0);
-            // Float32'i 16-bit PCM'e dönüştür
             const pcmBuffer = floatTo16BitPCM(inputData);
-            // Veriyi doğrudan göndermek yerine sıraya al
             if (pcmBuffer.byteLength > 0) {
               enqueueSend(pcmBuffer);
-            } else {
-              console.warn('Boş PCM tamponu gönderilmeye çalışıldı.');
             }
           };
 
           // Ses alıcıyı ayarla
-          setupAudioReceiver();
+          await setupAudioReceiver();
         } catch (err) {
           console.error('Mikrofon erişiminde hata:', err);
           setStatus('Mikrofon Hatası');
+          setPermissionError('Mikrofon erişimi sağlanamadı. Lütfen tarayıcı ayarlarınızı kontrol edin.');
         }
       };
 
@@ -590,6 +652,7 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
     } catch (err) {
       console.error('Bağlantı Hatası:', err);
       setStatus('Bağlantı Başarısız');
+      setPermissionError('Bağlantı kurulamadı. Lütfen internet bağlantınızı kontrol edin ve tekrar deneyin.');
     }
   };
 
@@ -643,6 +706,12 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
   return (
     <div className="bg-[#F7F5FF]/30 rounded-lg p-3 shadow-inner">
       <LoadingOverlay isVisible={isLoading} />
+      
+      {permissionError && (
+        <div className="mb-3 p-2 bg-red-100 border border-red-400 text-red-700 rounded text-sm">
+          {permissionError}
+        </div>
+      )}
       
       <div className="controls-section bg-white rounded-lg shadow-sm p-3 border border-[#E9E4FF]">
         <button 
