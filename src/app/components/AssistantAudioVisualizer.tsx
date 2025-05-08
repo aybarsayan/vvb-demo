@@ -171,7 +171,7 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
   useEffect(() => {
     const checkMobile = () => {
       const userAgent = navigator.userAgent || navigator.vendor || (window as any).opera;
-      const mobileRegex = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
+      const mobileRegex = /iPhone|iPad|iPod|Android/i;
       setIsMobile(mobileRegex.test(userAgent));
     };
     
@@ -264,75 +264,59 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
   };
 
   // Ses tamponunu işleme
-  const processAudioBuffer = () => {
+  const processAudioBuffer = async () => {
     while (audioBufferQueueRef.current.length > 0) {
       const buffer = audioBufferQueueRef.current.shift();
       if (!buffer || !audioContextReceiverRef.current) continue;
 
-      // Bu tamponun süresini hesaplama
-      const duration = buffer.length / SAMPLE_RATE_RECEIVER;
-
-      // Mobil cihazlar için özel işlem
-      if (isMobile) {
-        // Ses bağlamının durumunu kontrol et ve gerekirse başlat
-        if (audioContextReceiverRef.current.state === 'suspended') {
-          audioContextReceiverRef.current.resume();
-        }
-      }
-
-      // nextPlaybackTime'ı audioContext'in currentTime'ından geride ise ayarlama
-      const currentTime = audioContextReceiverRef.current.currentTime;
-      if (nextPlaybackTimeRef.current < currentTime + 0.01) {
-        nextPlaybackTimeRef.current = currentTime + 0.01;
-      }
-
-      // Float32Array'den AudioBuffer oluşturma
-      const audioBuffer = audioContextReceiverRef.current.createBuffer(1, buffer.length, SAMPLE_RATE_RECEIVER);
-      audioBuffer.copyToChannel(buffer, 0, 0);
-
-      // BufferSource oluşturma
-      const source = audioContextReceiverRef.current.createBufferSource();
-      source.buffer = audioBuffer;
-
-      // Mobil cihazlar için ses çıkışını optimize et
-      if (isMobile) {
-        // Ses seviyesini artır
-        const gainNode = audioContextReceiverRef.current.createGain();
-        gainNode.gain.value = 1.5; // Ses seviyesini %50 artır
-        
-        // Ses çıkışını bağla
-        source.connect(gainNode);
-        gainNode.connect(audioContextReceiverRef.current.destination);
-      } else {
-        source.connect(audioContextReceiverRef.current.destination);
-      }
-
-      // Tamponu zamanla
       try {
+        // Mobil cihazlar için ses bağlamını kontrol et
+        if (isMobile && audioContextReceiverRef.current.state === 'suspended') {
+          await audioContextReceiverRef.current.resume();
+        }
+
+        const duration = buffer.length / SAMPLE_RATE_RECEIVER;
+        const currentTime = audioContextReceiverRef.current.currentTime;
+        
+        if (nextPlaybackTimeRef.current < currentTime + 0.01) {
+          nextPlaybackTimeRef.current = currentTime + 0.01;
+        }
+
+        const audioBuffer = audioContextReceiverRef.current.createBuffer(1, buffer.length, SAMPLE_RATE_RECEIVER);
+        audioBuffer.copyToChannel(buffer, 0, 0);
+
+        const source = audioContextReceiverRef.current.createBufferSource();
+        source.buffer = audioBuffer;
+
+        // Mobil cihazlar için ses çıkışını optimize et
+        if (isMobile) {
+          const gainNode = audioContextReceiverRef.current.createGain();
+          gainNode.gain.value = 2.0; // Ses seviyesini artır
+          
+          source.connect(gainNode);
+          gainNode.connect(audioContextReceiverRef.current.destination);
+        } else {
+          source.connect(audioContextReceiverRef.current.destination);
+        }
+
         source.start(nextPlaybackTimeRef.current);
-      } catch (e) {
-        console.error('Ses kaynağını başlatırken hata:', e);
-        continue;
+        activeAudioSourcesRef.current.push(source);
+
+        source.onended = () => {
+          const index = activeAudioSourcesRef.current.indexOf(source);
+          if (index > -1) {
+            activeAudioSourcesRef.current.splice(index, 1);
+          }
+          if (activeAudioSourcesRef.current.length === 0 && audioBufferQueueRef.current.length === 0) {
+            setIsAISpeaking(false);
+            setWaveIntensity(0);
+          }
+        };
+
+        nextPlaybackTimeRef.current += duration;
+      } catch (error) {
+        console.error('Ses işleme hatası:', error);
       }
-
-      // Aktif kaynağı potansiyel sıfırlama için takip et
-      activeAudioSourcesRef.current.push(source);
-
-      // Kaynak bittiğinde aktif kaynaklardan kaldır
-      source.onended = () => {
-        const index = activeAudioSourcesRef.current.indexOf(source);
-        if (index > -1) {
-          activeAudioSourcesRef.current.splice(index, 1);
-        }
-        // Tüm ses verileri bittiyse konuşmanın bittiğini belirt
-        if (activeAudioSourcesRef.current.length === 0 && audioBufferQueueRef.current.length === 0) {
-          setIsAISpeaking(false);
-          setWaveIntensity(0);
-        }
-      };
-
-      // nextPlaybackTime'ı güncelle
-      nextPlaybackTimeRef.current += duration;
     }
   };
 
@@ -373,38 +357,37 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
   // Ses alıcıyı hazırlama
   const setupAudioReceiver = async () => {
     try {
-      // Ses alma için AudioContext başlatma
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       
-      // Mobil tarayıcılar için özel işlem
+      if (!audioContextReceiverRef.current) {
+        audioContextReceiverRef.current = new AudioCtx({
+          sampleRate: SAMPLE_RATE_RECEIVER,
+          latencyHint: isMobile ? 'interactive' : 'playback'
+        });
+      }
+
+      // Mobil cihazlar için özel işlem
       if (isMobile) {
-        // Kullanıcı etkileşimi gerektiren bir olayı bekle
         const resumeAudioContext = async () => {
           if (audioContextReceiverRef.current?.state === 'suspended') {
             await audioContextReceiverRef.current.resume();
           }
         };
-        
-        // Sayfa yüklendiğinde ve kullanıcı etkileşiminde ses bağlamını başlat
+
+        // Kullanıcı etkileşimi ile ses bağlamını başlat
         document.addEventListener('click', resumeAudioContext, { once: true });
         document.addEventListener('touchstart', resumeAudioContext, { once: true });
+        
+        // Ses bağlamını hemen başlat
+        if (audioContextReceiverRef.current.state === 'suspended') {
+          await audioContextReceiverRef.current.resume();
+        }
       }
 
-      audioContextReceiverRef.current = new AudioCtx({
-        sampleRate: SAMPLE_RATE_RECEIVER,
-        latencyHint: isMobile ? 'interactive' : 'playback'
-      });
-
-      // Mobil cihazlar için ses bağlamını hemen başlat
-      if (isMobile && audioContextReceiverRef.current.state === 'suspended') {
-        await audioContextReceiverRef.current.resume();
-      }
-
-      // Oynatma zamanlama değişkenlerini başlat
       nextPlaybackTimeRef.current = audioContextReceiverRef.current.currentTime + 0.01;
 
       if (websocketRef.current) {
-        websocketRef.current.onmessage = (event) => {
+        websocketRef.current.onmessage = async (event) => {
           if (typeof event.data === 'string') {
             // Metin mesajlarını işle
             console.log(`Metin mesajı alındı: ${event.data}`);
@@ -441,38 +424,28 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
               setIsUserMessage(false);
             }
           } else if (event.data instanceof ArrayBuffer) {
-            // Binary (ses) mesajlarını işle
-            const arrayBuffer = event.data;
-
-            if (!arrayBuffer || arrayBuffer.byteLength === 0) {
-              console.warn('Boş ses paketi alındı.');
-              return;
-            }
-
-            console.log(`${arrayBuffer.byteLength} byte uzunluğunda ses paketi alındı.`);
-
-            // Int16Array oluşturmayı dene
-            let int16Array;
             try {
-              int16Array = new Int16Array(arrayBuffer);
-            } catch (e) {
-              console.error('ArrayBuffer\'ı Int16Array\'e dönüştürürken hata:', e);
-              return;
+              const arrayBuffer = event.data;
+              if (!arrayBuffer || arrayBuffer.byteLength === 0) return;
+
+              const int16Array = new Int16Array(arrayBuffer);
+              if (int16Array.length === 0) return;
+
+              const float32Array = int16ToFloat32(int16Array);
+              if (float32Array.length === 0) return;
+
+              // Mobil cihazlar için ses işleme
+              if (isMobile) {
+                // Ses bağlamını kontrol et
+                if (audioContextReceiverRef.current?.state === 'suspended') {
+                  await audioContextReceiverRef.current.resume();
+                }
+              }
+
+              enqueueAudio(float32Array);
+            } catch (error) {
+              console.error('Ses işleme hatası:', error);
             }
-
-            if (int16Array.length === 0) {
-              console.warn('0 uzunluklu Int16Array alındı.');
-              return;
-            }
-
-            const float32Array = int16ToFloat32(int16Array);
-
-            if (float32Array.length === 0) {
-              console.warn('Dönüştürülen Float32Array\'in uzunluğu 0.');
-              return;
-            }
-
-            enqueueAudio(float32Array);
           } else {
             console.warn('Desteklenmeyen mesaj türü alındı.');
           }
@@ -583,32 +556,30 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
     try {
       setPermissionError(null);
       
-      // Bağlantı öncesi temizlik yap
       if (websocketRef.current) {
         disconnect();
       }
 
-      // Mobil tarayıcılar için özel işlem
+      // Mobil cihazlar için özel işlem
       if (isMobile) {
-        // Önce ses izinlerini kontrol et
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ 
             audio: {
               echoCancellation: true,
               noiseSuppression: true,
               autoGainControl: true,
-              channelCount: 1 // Mono ses
+              channelCount: 1,
+              sampleRate: SAMPLE_RATE
             } 
           });
-          stream.getTracks().forEach(track => track.stop()); // İzinleri aldıktan sonra stream'i kapat
+          stream.getTracks().forEach(track => track.stop());
         } catch (err) {
           console.error('Mikrofon izni alınamadı:', err);
           setPermissionError('Mikrofon erişimi reddedildi. Lütfen tarayıcı ayarlarından mikrofon iznini etkinleştirin.');
           return;
         }
       }
-      
-      // WebSocket'i başlat
+
       const currentFlowName = flowName || 'demo';
       websocketRef.current = new WebSocket(`wss://duplexdev.virtualvoicebridge.com/ws?flowName=sirket-ici-demo`);
       websocketRef.current.binaryType = 'arraybuffer';
@@ -618,34 +589,30 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
         setStatus('Bağlandı');
         setIsConnected(true);
 
-        // Gönderen için AudioContext'i başlat
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         audioContextSenderRef.current = new AudioCtx({
           sampleRate: SAMPLE_RATE,
           latencyHint: isMobile ? 'interactive' : 'playback'
         });
 
-        // Mikrofon erişimi al
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ 
             audio: {
               echoCancellation: true,
               noiseSuppression: true,
-              autoGainControl: true
+              autoGainControl: true,
+              channelCount: 1,
+              sampleRate: SAMPLE_RATE
             } 
           });
           
           microphoneRef.current = audioContextSenderRef.current.createMediaStreamSource(stream);
-
-          // Tampon boyutunu örneklerde hesapla
           const bufferSizeInSamples = BUFFER_SIZE / BYTES_PER_SAMPLE / CHANNELS;
           scriptProcessorRef.current = audioContextSenderRef.current.createScriptProcessor(bufferSizeInSamples, CHANNELS, CHANNELS);
 
-          // Düğümleri bağla
           microphoneRef.current.connect(scriptProcessorRef.current);
           scriptProcessorRef.current.connect(audioContextSenderRef.current.destination);
 
-          // Ses işleme ve göndermeyi ele al
           scriptProcessorRef.current.onaudioprocess = (audioProcessingEvent) => {
             const inputBuffer = audioProcessingEvent.inputBuffer;
             const inputData = inputBuffer.getChannelData(0);
@@ -655,7 +622,6 @@ const AssistantAudioVisualizer = ({ flowName: initialFlowName = "" }: AudioVisua
             }
           };
 
-          // Ses alıcıyı ayarla
           await setupAudioReceiver();
         } catch (err) {
           console.error('Mikrofon erişiminde hata:', err);
